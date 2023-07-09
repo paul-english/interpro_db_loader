@@ -9,7 +9,7 @@ use std::io::{self, Write};
 
 use tokio_postgres::{NoTls, Client, Config, Connection, Socket, tls::{NoTlsStream}};
 use indicatif::{ProgressBar, ProgressStyle};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 
 async fn build_db(arc_client: &Arc<Mutex<Client>>) -> Result<(), Box<dyn std::error::Error>> {
     let client = arc_client.lock().await;
@@ -107,19 +107,15 @@ async fn process_dbinfo(arc_client: &Arc<Mutex<Client>>, dbinfo: DbInfo) -> Resu
     ]).await?;
     Ok(())
 }
-async fn process_protein(arc_client: &Arc<Mutex<Client>>, protein: Protein, known_protein_ids: &Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+async fn process_protein(arc_client: &Arc<Mutex<Client>>, protein: Protein) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = arc_client.lock().await;
     let transaction = client.transaction().await?;
     let attrs_map: HashMap<_, _> = protein.attrs.into_iter().collect();
     //println!("protein attrs: {:?}", attrs_map);
-    let id = attrs_map.get("id").unwrap();
-    if known_protein_ids.contains(id) {
-        return Ok(())
-    }
     let stmt = transaction.prepare("INSERT INTO protein (id, name, length, crc64) VALUES ($1, $2, $3, $4) RETURNING protein_id").await?;
     let length: &String = attrs_map.get("length").unwrap();
     let protein_id: i32 = transaction.query_one(&stmt, &[
-        id,
+        attrs_map.get("id").unwrap(),
         attrs_map.get("name").unwrap(),
         &length.parse::<i32>().unwrap(),
         attrs_map.get("crc64").unwrap()
@@ -285,12 +281,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
     let mut msg = String::new();
 
-    /*
-    let (tx, mut rx) = mpsc::channel(32);
-    */
+    let (tx, mut rx) = mpsc::channel(256);
+    let semaphore = Arc::new(Semaphore::new(256));
+
+    let mut skip_this_protein = false;
 
     for e in parser {
-        i += 1;
         let iteration_start_time = Instant::now();
 
         match e {
@@ -303,7 +299,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         entry_count: attrs_map.get("entry_count").unwrap().clone(),
                         file_date: attrs_map.get("file_date").unwrap().clone(), 
                     }).await?;
-                } else if ["protein", "match", "ipr", "lcn"].contains(&&name.local_name.as_str()) {
+                } else if name.local_name.as_str() == "protein" {
+                        let attrs: Vec<(String, String)> = attributes.into_iter().map(|a| (a.name.local_name, a.value)).collect();
+                        attrs.iter().for_each(|(name, val)| {
+                            if name == "id" {
+                                if loaded_protein_ids.contains(&val) {
+                                    // skip until the next protein
+                                    //println!("skipping protein {}", a.value);
+                                    skip_this_protein = true;
+                                } else {
+                                    skip_this_protein = false;
+                                }
+                            }
+                        });
+                        if skip_this_protein {
+
+                            i += 1;
+                            if i % 100 == 0 {
+
+                                let iteration_duration = iteration_start_time.elapsed();
+                                let total_elapsed = start_time.elapsed();
+                                msg = format!(
+                                    "Iteration: {}, Iteration Time: {:.2?}, Total Time: {:.2?}",
+                                    i,
+                                    iteration_duration,
+                                    total_elapsed
+                                );
+                                bar.inc(100);
+                                bar.set_message(msg);
+                            }
+
+                            continue;
+                        } else {
+                            stack.push((
+                                name.local_name, 
+                                attrs, 
+                                Vec::new()
+                            ));
+
+                        }
+                } else if ["match", "ipr", "lcn"].contains(&&name.local_name.as_str()) {
+                    if skip_this_protein {
+                        continue
+                    }
                     //println!("start element: {:?}", name);
                     stack.push((
                         name.local_name, 
@@ -353,18 +391,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         //println!("protein: {:?}", protein);
-                        /* WIP Exhausts memory, need a threadpool
                         let client = Arc::clone(&client);
                         let tx = tx.clone();
+                        let sem_clone = Arc::clone(&semaphore);
 
                         tokio::spawn(async move {
                             //let (client, _connection) = get_db().await;
+                            let _permit = sem_clone.acquire().await.expect("Failed to acquire permit");
                             process_protein(&client, protein).await.unwrap();
                             tx.send(()).await.expect("channel can be waited");
                         });
-                        */
-                        process_protein(&client, protein, &loaded_protein_ids).await.unwrap();
+                        //process_protein(&client, protein).await.unwrap();
 
+                        i += 1;
                         let iteration_duration = iteration_start_time.elapsed();
                         let total_elapsed = start_time.elapsed();
                         msg = format!(
@@ -400,9 +439,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    /*
+    // Make sure all the async db tasks finish up
     while let Some(_) = rx.recv().await {}
-     */
 
     bar.finish_with_message("completed");
  
