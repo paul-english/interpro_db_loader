@@ -42,15 +42,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     wtr.write_record(&[
         "protein_id",
         "match_id",
-        "id",
         "start",
         "end",
         "fragments",
         "score",
     ])?;
 
-    let protein_id: String = String::new();
-    let match_id: String = String::new();
+    let mut protein_id: String = String::new();
+    let mut match_id: String = String::new();
 
     for e in parser {
         let iteration_start_time = Instant::now();
@@ -59,10 +58,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if name.local_name.as_str() == "protein" {
                     let attrs: Vec<(String, String)> = attributes.into_iter().map(|a| (a.name.local_name, a.value)).collect();
                     protein_id = attrs[0].1.clone();
-                else if name.local_name.as_str() == "match" {
+                } else if name.local_name.as_str() == "match" {
                     let attrs: Vec<(String, String)> = attributes.into_iter().map(|a| (a.name.local_name, a.value)).collect();
                     match_id = attrs[0].1.clone();
-                else if name.local_name.as_str() == "lcn" {
+                } else if name.local_name.as_str() == "lcn" {
                     // Attrs (key, value): id, name, length, crc64
                     let attrs: HashMap<String, String> = attributes.into_iter().map(|a| (a.name.local_name, a.value)).collect();
 
@@ -70,14 +69,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     wtr.write_record(&[
                         protein_id.clone(),
                         match_id.clone(),
-                        attrs['id'].clone(),
-                        attrs['start'].clone(),
-                        attrs['end'].clone(),
-                        attrs['fragments'].clone(),
-                        attrs['score'].clone(),
+                        attrs["start"].clone(),
+                        attrs["end"].clone(),
+                        attrs["fragments"].clone(),
+                        attrs["score"].clone(),
                     ])?;
 
-                    if (i % 100 == 0) {
+                    if i % 100 == 0 {
                         let iteration_duration = iteration_start_time.elapsed();
                         let total_elapsed = start_time.elapsed();
                         msg = format!(
